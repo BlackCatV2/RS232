@@ -27,6 +27,31 @@ Program realizuje projekt z instrukcji cwiczenia 1:
 .\.venv\Scripts\python.exe main.py
 ```
 
+## Prosty terminal konsolowy
+
+Najprostszy wariant bez GUI jest w pliku `konsola_rs232.py`:
+
+```powershell
+.\.venv\Scripts\python.exe konsola_rs232.py
+```
+
+Mozna tez podac port od razu:
+
+```powershell
+.\.venv\Scripts\python.exe konsola_rs232.py --port COM3 --baud 9600
+```
+
+Po uruchomieniu zwykly wpisany tekst jest wysylany przez RS-232, a odbior dziala w tle.
+Dostepne komendy:
+
+```text
+/hex 01 02 0D 0A
+/term none|cr|lf|crlf
+/status
+/help
+/quit
+```
+
 Do testu na jednym komputerze mozna uzyc pary wirtualnych portow COM z emulatora
 null-modem albo wpisac `loop://` w pole portu, aby wykonac prosty test petli zwrotnej
 obslugiwany przez `pyserial`.
