@@ -185,6 +185,8 @@ class MainWindow(QMainWindow):
         self.pending_pings = {}
         self.ignore_master_echo = deque(maxlen=8)
         self.ignore_slave_echo = deque(maxlen=8)
+        self.rx_bytes_total = 0
+        self.last_rx_at = None
 
         self._build_ui()
         self.refresh_ports()
@@ -201,6 +203,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._terminal_tab(), "Terminal RS-232")
         tabs.addTab(self._modbus_tab(), "MODBUS ASCII")
+        tabs.addTab(self._cable_tab(), "Test kabla i piny")
         layout.addWidget(tabs, 1)
         self.setCentralWidget(root)
 
@@ -416,6 +419,85 @@ class MainWindow(QMainWindow):
         layout.addWidget(log_box, 1)
         return tab
 
+    def _cable_tab(self):
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+
+        map_box = QGroupBox("Mapa pinow DB9 null-modem")
+        map_layout = QVBoxLayout(map_box)
+        pin_map = QTextEdit()
+        pin_map.setReadOnly(True)
+        pin_map.setStyleSheet("font-family: Consolas, monospace")
+        pin_map.setPlainText(
+            "Minimalne polaczenie wymagane do transmisji w dwie strony:\n\n"
+            "Komputer A DB9              Komputer B DB9\n"
+            "pin 2  RXD   <-----------   pin 3  TXD\n"
+            "pin 3  TXD   ----------->   pin 2  RXD\n"
+            "pin 5  GND   <---------->   pin 5  GND\n\n"
+            "Linie sterujace zgodne z instrukcja cwiczenia:\n\n"
+            "pin 7  RTS   ----------->   pin 8  CTS\n"
+            "pin 8  CTS   <-----------   pin 7  RTS\n"
+            "pin 4  DTR   ----------->   pin 6  DSR\n"
+            "pin 6  DSR   <-----------   pin 4  DTR\n"
+            "pin 1  CD    opcjonalnie / zalezy od kabla\n"
+            "pin 9  RI    opcjonalnie / zwykle nieuzywany\n"
+        )
+        map_layout.addWidget(pin_map, 1)
+
+        verify_box = QGroupBox("Weryfikacja z programu")
+        verify = QGridLayout(verify_box)
+        self.pin_status_labels = {}
+        rows = [
+            ("Wejscie pin 8 CTS", "CTS"),
+            ("Wejscie pin 6 DSR", "DSR"),
+            ("Wejscie pin 9 RI", "RI"),
+            ("Wejscie pin 1 CD", "CD"),
+            ("Wyjscie pin 7 RTS", "RTS"),
+            ("Wyjscie pin 4 DTR", "DTR"),
+        ]
+        for row, (label, key) in enumerate(rows):
+            verify.addWidget(QLabel(label), row, 0)
+            value = QLabel("-")
+            value.setStyleSheet("font-weight: 600")
+            self.pin_status_labels[key] = value
+            verify.addWidget(value, row, 1)
+
+        self.rx_count_label = QLabel("0 bajtow")
+        self.last_rx_label = QLabel("-")
+        self.last_test_label = QLabel("-")
+        verify.addWidget(QLabel("Odebrane dane RXD pin 2"), 6, 0)
+        verify.addWidget(self.rx_count_label, 6, 1)
+        verify.addWidget(QLabel("Ostatni odbior"), 7, 0)
+        verify.addWidget(self.last_rx_label, 7, 1)
+        verify.addWidget(QLabel("Ostatni test kierunku"), 8, 0)
+        verify.addWidget(self.last_test_label, 8, 1)
+
+        send_ab = QPushButton("Wyslij test A->B")
+        send_ba = QPushButton("Wyslij test B->A")
+        clear = QPushButton("Wyczysc wynik")
+        send_ab.clicked.connect(lambda: self.send_cable_test("A->B"))
+        send_ba.clicked.connect(lambda: self.send_cable_test("B->A"))
+        clear.clicked.connect(self.clear_cable_result)
+        verify.addWidget(send_ab, 9, 0)
+        verify.addWidget(send_ba, 9, 1)
+        verify.addWidget(clear, 10, 0)
+        verify.setColumnStretch(1, 1)
+
+        note = QTextEdit()
+        note.setReadOnly(True)
+        note.setMaximumHeight(130)
+        note.setPlainText(
+            "TXD/RXD nie da sie potwierdzic samym odczytem stanu pinu. "
+            "Program weryfikuje je testem transmisji: jeden komputer wysyla znacznik, "
+            "drugi musi go odebrac. Linie CTS/DSR/RI/CD sa odczytywane na zywo, "
+            "a DTR/RTS ustawiaja checkboxy w gornej belce."
+        )
+        verify.addWidget(note, 11, 0, 1, 2)
+
+        layout.addWidget(map_box, 1)
+        layout.addWidget(verify_box, 1)
+        return tab
+
     def refresh_ports(self):
         current = self.port_combo.currentText()
         ports = [port.device for port in serial.tools.list_ports.comports()]
@@ -494,6 +576,21 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.show_error("Blad PING", str(exc))
 
+    def send_cable_test(self, direction: str):
+        try:
+            token = f"TEST_KABLA_{direction}:{time.strftime('%H:%M:%S')}"
+            self.send_bytes(token.encode("ascii") + self.get_terminator(), f"TX test kabla {direction}")
+            self.last_test_label.setText(f"Wyslano {direction}: {token}")
+        except ValueError as exc:
+            self.show_error("Blad testu kabla", str(exc))
+
+    def clear_cable_result(self):
+        self.rx_bytes_total = 0
+        self.last_rx_at = None
+        self.rx_count_label.setText("0 bajtow")
+        self.last_rx_label.setText("-")
+        self.last_test_label.setText("-")
+
     def start_master_transaction(self):
         if not self.serial.is_open:
             self.show_error("Port", "Najpierw otworz port szeregowy.")
@@ -558,12 +655,22 @@ class MainWindow(QMainWindow):
 
     def handle_rx(self, data: bytes):
         decoded = data.decode(self.encoding_combo.currentText(), errors="replace")
+        self.rx_bytes_total += len(data)
+        self.last_rx_at = time.strftime("%H:%M:%S")
+        self.rx_count_label.setText(f"{self.rx_bytes_total} bajtow")
+        self.last_rx_label.setText(f"{self.last_rx_at} | HEX: {hex_view(data[-32:])}")
+        self.update_cable_test_result(decoded)
         self.rx_text.moveCursor(self.rx_text.textCursor().MoveOperation.End)
         self.rx_text.insertPlainText(decoded)
         self.rx_text.moveCursor(self.rx_text.textCursor().MoveOperation.End)
         self.hex_rx_label.setText(f"Odebrane HEX: {hex_view(data[-96:])}")
         self.feed_modbus(data)
         self.handle_ping(decoded)
+
+    def update_cable_test_result(self, decoded: str):
+        match = re.search(r"TEST_KABLA_(A->B|B->A):\d{2}:\d{2}:\d{2}", decoded)
+        if match:
+            self.last_test_label.setText(f"Odebrano {match.group(0)}")
 
     def handle_ping(self, decoded: str):
         for token in re.findall(r"PING:\d+", decoded):
@@ -657,8 +764,15 @@ class MainWindow(QMainWindow):
         status = self.serial.modem_status()
         if status:
             self.lines_label.setText("   ".join(f"{key}: {'1' if value else '0'}" for key, value in status.items()))
+            for key, value in status.items():
+                if key in self.pin_status_labels:
+                    self.pin_status_labels[key].setText("1" if value else "0")
         else:
             self.lines_label.setText("CTS: -   DSR: -   RI: -   CD: -")
+            for key in ("CTS", "DSR", "RI", "CD"):
+                self.pin_status_labels[key].setText("-")
+        self.pin_status_labels["RTS"].setText("1" if self.rts_check.isChecked() else "0")
+        self.pin_status_labels["DTR"].setText("1" if self.dtr_check.isChecked() else "0")
 
     def set_status(self, text: str):
         self.status_label.setText(text)
